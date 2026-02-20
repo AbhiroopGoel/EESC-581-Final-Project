@@ -1,0 +1,213 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8">
+    <title>Job Finder</title>
+    <link
+      href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.3/dist/css/bootstrap.min.css"
+      rel="stylesheet"
+    >
+    <style>
+      :root{--bg:#f8fafc;--card:#fff;--muted:#64748b;--accent:#0b5cff}
+      body{margin:0;font-family:Inter,ui-sans-serif,system-ui,Segoe UI,Roboto,Helvetica,Arial;background:var(--bg);color:#0f172a}
+      header{background:var(--accent);color:#fff;padding:12px 16px}
+      .container{max-width:900px;margin:20px auto;padding:0 16px}
+      .controls{display:flex;gap:8px;align-items:center;margin-top:12px}
+      .btn{background:var(--accent);color:#fff;border:none;padding:8px 10px;border-radius:6px;cursor:pointer}
+      .status{margin-top:12px;padding:8px;border-radius:6px;background:#eef2ff;color:#0b1a66}
+      #list{margin-top:16px;display:flex;flex-direction:column;gap:10px}
+      .job{background:var(--card);padding:12px;border-radius:8px;border:1px solid #e6eefb}
+      .job h3{margin:0 0 6px;font-size:16px}
+      .desc{color:var(--muted);margin-bottom:8px}
+      .skills{display:flex;flex-wrap:wrap;gap:6px}
+      .skill{background:#eef2f7;color:#0b2b4a;padding:4px 8px;border-radius:999px;font-size:12px}
+      .small{font-size:12px;color:#94a3b8}
+    </style>
+  </head>
+  <body>
+    <main class="container">
+      <div id="status" class="status">Not connected</div>
+      <div id="list"></div>
+    </main>
+
+    <script>
+      const statusEl = document.getElementById('status');
+      const listEl = document.getElementById('list');
+      let sock = null;
+      let reconnect = 0;
+      let userClosed = false;
+      let reconnectTimer = null;
+      let path = "/job_socket";
+
+      function setStatus(txt) { statusEl.textContent = txt }
+
+      function normalizeSkills(skills) {
+        if (!skills) return [];
+        if (Array.isArray(skills)) return skills;
+        if (typeof skills === 'string') return skills.split(',').map(s => s.trim()).filter(Boolean);
+        return [];
+      }
+
+      function renderJob(job) {
+        //job card for the job json
+        const card = document.createElement('article');
+        card.className = 'job';
+
+        const h = document.createElement('h3');
+        h.textContent = job.name || 'Untitled job';
+
+        const desc = document.createElement('div');
+        desc.className = 'desc';
+        desc.textContent = job.short_description || '';
+
+        const skillsWrap = document.createElement('div');
+        skillsWrap.className = 'skills';
+        const skills = normalizeSkills(job.skills);
+        for (const s of skills) {
+          const sp = document.createElement('span');
+          sp.className = 'skill';
+          sp.textContent = s;
+          skillsWrap.appendChild(sp);
+        }
+
+        card.appendChild(h);
+        card.appendChild(desc);
+        // add skills if they exist
+        if (skills.length) card.appendChild(skillsWrap);
+
+        // Save button
+        const actions = document.createElement('div');
+        const saveBtn = document.createElement('button');
+        saveBtn.textContent = 'Save';
+        saveBtn.className = 'btn btn-sm';
+        saveBtn.addEventListener('click', async () => {
+          saveBtn.disabled = true;
+          saveBtn.textContent = 'Saving...';
+          try {
+            const resp = await fetch('/save_job', {
+              method: 'POST',
+              headers: { 'Content-Type': 'application/json' },
+              body: JSON.stringify(job)
+            });
+            const data = await resp.json();
+            if (data.ok) {
+              saveBtn.textContent = 'Saved';
+              loadSavedJobs();
+            } else {
+              saveBtn.textContent = 'Error';
+              console.warn(data);
+            }
+          } catch (e) {
+            console.error(e);
+            saveBtn.textContent = 'Failed';
+          }
+          setTimeout(() => {
+            if (saveBtn.textContent === 'Saved') return;
+            saveBtn.disabled = false;
+            saveBtn.textContent = 'Save';
+          }, 2000);
+        });
+        actions.appendChild(saveBtn);
+        card.appendChild(actions);
+
+        listEl.insertBefore(card, listEl.firstChild);
+      }
+
+      function handleMessage(evt) {
+        // receive websocket json message and render jobs
+        try {
+          const data = JSON.parse(evt.data);
+          if (Array.isArray(data)) {
+            data.forEach(renderJob);
+          } else if (data && typeof data === 'object') {
+            if (data.type === 'jobs' && Array.isArray(data.data)) {
+              data.data.forEach(renderJob);
+            } else if (data.type === 'job' && data.data) {
+              renderJob(data.data);
+            } else {
+              renderJob(data);
+            }
+          }
+        } catch (e) {
+          console.warn('Invalid JSON:', evt.data);
+        }
+      }
+
+      function connect() {
+        // log when websocket connects
+        userClosed = false;
+        if (sock) { try { sock.close() } catch {} sock = null; }
+        if (reconnectTimer) { clearTimeout(reconnectTimer); reconnectTimer = null; }
+
+        const proto = location.protocol === 'https:' ? 'wss' : 'ws';
+        const url = `${proto}://${location.host}${path}`;
+        setStatus('Connecting to ' + url + ' ...');
+
+        sock = new WebSocket(url);
+
+        sock.addEventListener('open', () => {
+          reconnect = 0;
+          setStatus('Connected');
+        });
+
+        sock.addEventListener('message', handleMessage);
+
+        sock.addEventListener('close', () => {
+          if (userClosed) { setStatus('Disconnected (manual)'); return; }
+          reconnect++;
+          const wait = Math.min(30000, 800 * Math.pow(1.5, reconnect));
+          setStatus(`Disconnected, reconnecting in ${Math.round(wait / 1000)}s ...`);
+          reconnectTimer = setTimeout(connect, wait);
+        });
+
+        sock.addEventListener('error', (e) => {
+          console.error('WebSocket error:', e);
+          setStatus('WebSocket error (see console)');
+        });
+      }
+      // auto-connect on load
+      connect();
+
+      // Saved jobs section
+      const savedWrap = document.createElement('section');
+      savedWrap.innerHTML = '<h2>Saved Jobs</h2><div id="saved_list" style="display:flex;flex-direction:column;gap:8px"></div>';
+      document.body.appendChild(savedWrap);
+      const savedList = savedWrap.querySelector('#saved_list');
+
+      async function loadSavedJobs() {
+        try {
+          const resp = await fetch('/saved_jobs');
+          const data = await resp.json();
+          if (!data.ok) return;
+          savedList.innerHTML = '';
+          for (const job of data.data) {
+            const div = document.createElement('div');
+            div.className = 'job';
+            const h = document.createElement('h3');
+            h.textContent = job.name;
+            const d = document.createElement('div');
+            d.className = 'desc';
+            d.textContent = job.short_description || '';
+            const skillsWrap = document.createElement('div');
+            skillsWrap.className = 'skills';
+            for (const s of normalizeSkills(job.skills)) {
+              const sp = document.createElement('span');
+              sp.className = 'skill';
+              sp.textContent = s;
+              skillsWrap.appendChild(sp);
+            }
+            div.appendChild(h);
+            div.appendChild(d);
+            if (skillsWrap.children.length) div.appendChild(skillsWrap);
+            savedList.appendChild(div);
+          }
+        } catch (e) {
+          console.error('Failed to load saved jobs', e);
+        }
+      }
+
+      // initial load
+      loadSavedJobs();
+    </script>
+  </body>
+</html>
